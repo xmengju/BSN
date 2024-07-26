@@ -1,3 +1,5 @@
+# BSN: Bayesian Scalar-on-network Regression
+This repository contains the code implementing the Bayesian scalar-on-network (BSN) regression proposed in https://arxiv.org/abs/2401.16749.
 
 <!-- README.md is generated from README.Rmd. Please edit that file -->
 
