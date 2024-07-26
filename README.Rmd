@@ -1,0 +1,122 @@
+---
+output: github_document
+---
+
+<!-- README.md is generated from README.Rmd. Please edit that file -->
+
+
+## An illustrating example
+
+Below we demonstrate the use of the proposed method (`BSN`) using simulated data.
+
+
+First, load the necessary functions, packages, and the stan model:  
+```{r,message=FALSE, warning = FALSE}
+source("function.R")
+library(expm)
+library(pracma)
+library(cmdstanr)
+library(bayesplot)
+bsn <- cmdstan_model("BSN-T(S).stan")
+```
+
+We simulate data following the setup in  [our manuscript](https://arxiv.org/abs/2401.16749), for a case with the following parameters
+
+- Number of variables (i.e. ROIs): `p = 15`
+- Number of reduced dimensions: `d = 2`
+- Training sample size: `n_train = 200`
+- Testing sample size: `n_test = 200`
+
+```{r,message=FALSE}
+## generate predictor matrices
+set.seed(111)
+n_train <- n_test <- 200; p <- 15; d <- 2
+n <- n_train+ n_test
+Ms <- array(NA, dim = c(n, p, p)) 
+
+for(i in  1: n){
+  U <- randortho(p) 
+  Ms[i,,] <- U%*%diag(exp(runif(p, -2, 2)))%*%t(U) 
+}
+
+## map matrices to the tangent space
+M_ast_inv_square_root <-  matrixsqrtinv(apply(Ms, c(2,3), mean))
+X_tan_log <- array(NA, dim = c(n, p, p)) 
+for(i in 1:n){
+  X_tan_log[i,,] <- logm(M_ast_inv_square_root %*% Ms[i,,]%*%M_ast_inv_square_root)
+}
+
+
+## generate Gamma matrix and B
+nl <- p*d - d^2/2 - d/2
+theta <- runif(nl, -pi/2, pi/2)
+theta[sample(1:nl, 0.5*round(nl))] <- 0
+Gamma <- theta_to_gamma(theta, p, d)
+B <- diag(c(-1,1))
+Gamma <- Gamma %*% diag(sign(diag(Gamma[apply(abs(Gamma), 2, which.max),])))  # adjust the sign
+
+
+## generate response
+y <- rep(NA, n)
+for(i in 1:n){
+  y[i] <- sum ((t(Gamma)%*%X_tan_log[i,,]%*%Gamma) * B)
+}
+y <- y + rnorm(n, 0, 0.5)
+```
+
+The true values of the parameters `Gamma` and `B` are as follows:
+
+```{r,message=FALSE}
+print(Gamma)
+print(B)
+```
+We divide the data into training and test sets. Using the training set, we sample from the posterior distribution using Stan:
+
+```{r, message= FALSE}
+## run mcmc for linear model without/with regularization
+idx_train <- sample(1:(n_train+n_test), n_train)
+
+sigma_prior <- 1 # in practice from some initial linear fit using vectorized matrix predictors
+data.train <- list(n = n_train, p = p, d = d, X = X_tan_log[idx_train,,], Y = y[idx_train], sigma_prior = sigma_prior, tau = 0.1)
+chains  <- 1; parallel_chains <- 1; refresh <- 200; iter_warmup <- 1500; iter_sampling <- 500
+fit_bsn <- bsn$sample(data = data.train, chains = chains, parallel_chains = parallel_chains, 
+             refresh = refresh, iter_warmup = iter_warmup, iter_sampling  = iter_sampling)
+```
+
+After obtaining posterior samples, we perform a sign adjustment on the `Gamma` samples. For each column of `Gamma`, if the entry with the largest absolute value is negative, we multiply the entire column by -1. 
+
+
+```{r}
+Gamma_samples <- process_gamma(fit_bsn$draws("Gamma"), Gamma)  
+```
+
+We visualize the uncertainty in our parameter estimates using 90\% credible intervals for  `Gamma` and diagonal elements of `B`: 
+```{r}
+mcmc_intervals(Gamma_samples)
+mcmc_intervals(fit_bsn$draws("beta"))
+```
+
+
+We assess the predictive capability of our model using in-sample and out-of-sample predictions. The red line represents `y = x`. 
+
+
+```{r, fig.width = 11}
+pred_train <- pred.lm(fit_bsn, X = X_tan_log[idx_train ,,], X_new = X_tan_log[idx_train,,])
+
+par(mfrow = c(1,2))
+plot(y= apply(pred_train, 3, mean), x = y[idx_train], ylab = "pred y train", xlab = "y train")
+abline(a = 0, b = 1, col = "red")
+
+pred_test <- pred.lm(fit_bsn, X = X_tan_log[idx_train ,,], X_new = X_tan_log[-idx_train ,,]) 
+plot(y= apply(pred_test, 3, mean), x =  y[-idx_train],  ylab = "pred y test", xlab = "y test")
+abline(a = 0, b = 1, col = "red")
+```
+
+Lastly, we compute the in-sample and out-of-sample mean-squaire prediction error (MSPEs). 
+
+```{r}
+c(mean(c(apply(pred_train, 3, mean) -  y[idx_train])^2), mean((apply(pred_test, 3, mean) -  y[-idx_train])^2))
+```
+
+
+
